@@ -16,6 +16,7 @@ import numpy as np
 from typing import Dict, List, Optional, Iterator, Callable, Union, Tuple
 import json
 import random
+import re
 
 
 def binary_weight_transform(nums, top_percent=100):
@@ -228,7 +229,55 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
     return collate_fn
 
 
-def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, max_length: int, max_prompt_length: int, rejected_weight=None, chosen_weight=None) -> Dict:
+def _prompt_to_chat_messages(prompt: str) -> List[Dict[str, str]]:
+    """Convert the repo's Human/Assistant prompt format into chat messages."""
+    markers = list(re.finditer(r'\n\n(Human|Assistant):', prompt))
+    if not markers:
+        return [{'role': 'user', 'content': prompt}]
+
+    messages = []
+    for index, marker in enumerate(markers):
+        role = 'user' if marker.group(1) == 'Human' else 'assistant'
+        start = marker.end()
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(prompt)
+        content = prompt[start:end].strip()
+        if content:
+            messages.append({'role': role, 'content': content})
+
+    if not messages:
+        return [{'role': 'user', 'content': prompt}]
+    return messages
+
+
+def _tokenize_with_chat_template(prompt: str, response: str, tokenizer) -> Tuple[Dict, Dict, str, str]:
+    messages = _prompt_to_chat_messages(prompt)
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    response_text = tokenizer.apply_chat_template(
+        messages + [{'role': 'assistant', 'content': response}],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
+    response_sequence_tokens = tokenizer(response_text, add_special_tokens=False)
+    prompt_length = len(prompt_tokens['input_ids'])
+
+    if response_sequence_tokens['input_ids'][:prompt_length] != prompt_tokens['input_ids']:
+        raise ValueError('Chat template rendered response is not prefixed by the rendered prompt.')
+
+    response_tokens = {
+        k: v[prompt_length:]
+        for k, v in response_sequence_tokens.items()
+        if k in prompt_tokens
+    }
+    if response_tokens['input_ids'] and response_tokens['input_ids'][-1] == tokenizer.eos_token_id:
+        response_tokens['input_ids'] = response_tokens['input_ids'][:-1]
+        response_tokens['attention_mask'] = response_tokens['attention_mask'][:-1]
+
+    return prompt_tokens, response_tokens, prompt_text, response_text
+
+
+def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, max_length: int, max_prompt_length: int, rejected_weight=None, chosen_weight=None, use_chat_template: bool = False) -> Dict:
     """Tokenize a single batch element.
     
        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
@@ -239,10 +288,19 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
          the sum of the length of the prompt and the chosen/rejected response, with -100 for the
          prompt tokens.
     """
-    chosen_tokens = tokenizer(chosen, add_special_tokens=False)
-    # len(chosen_tokens['input_ids'])  104
-    rejected_tokens = tokenizer(rejected, add_special_tokens=False)
-    prompt_tokens = tokenizer(prompt, add_special_tokens=False)
+    if use_chat_template:
+        if not getattr(tokenizer, 'chat_template', None):
+            raise ValueError('use_chat_template=True, but the tokenizer does not define a chat_template.')
+        prompt_tokens, chosen_tokens, rendered_prompt, rendered_chosen = _tokenize_with_chat_template(prompt, chosen, tokenizer)
+        _, rejected_tokens, _, rendered_rejected = _tokenize_with_chat_template(prompt, rejected, tokenizer)
+    else:
+        chosen_tokens = tokenizer(chosen, add_special_tokens=False)
+        # len(chosen_tokens['input_ids'])  104
+        rejected_tokens = tokenizer(rejected, add_special_tokens=False)
+        prompt_tokens = tokenizer(prompt, add_special_tokens=False)
+        rendered_prompt = prompt
+        rendered_chosen = prompt + chosen
+        rendered_rejected = prompt + rejected
 
     if rejected_weight is not None:
         assert len(rejected_weight) == len(rejected_tokens['input_ids']) 
@@ -250,9 +308,10 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
     if chosen_weight is not None:
         assert len(chosen_weight) == len(chosen_tokens['input_ids'])
     
-    assert tokenizer.eos_token_id not in prompt_tokens['input_ids'], f"Prompt contains EOS token: {prompt}"
-    assert tokenizer.eos_token_id not in chosen_tokens['input_ids'], f"Chosen response contains EOS token: {chosen}"
-    assert tokenizer.eos_token_id not in rejected_tokens['input_ids'], f"Rejected response contains EOS token: {rejected}"
+    if not use_chat_template:
+        assert tokenizer.eos_token_id not in prompt_tokens['input_ids'], f"Prompt contains EOS token: {prompt}"
+        assert tokenizer.eos_token_id not in chosen_tokens['input_ids'], f"Chosen response contains EOS token: {chosen}"
+        assert tokenizer.eos_token_id not in rejected_tokens['input_ids'], f"Rejected response contains EOS token: {rejected}"
 
     chosen_tokens['input_ids'].append(tokenizer.eos_token_id)
     chosen_tokens['attention_mask'].append(1)
@@ -300,9 +359,9 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
     assert len(batch['chosen_weight']) == len(chosen_sequence_tokens['labels'])
     assert len(batch['rejected_weight']) == len(rejected_sequence_tokens['labels'])
 
-    batch['prompt'] = prompt
-    batch['chosen'] = prompt + chosen
-    batch['rejected'] = prompt + rejected
+    batch['prompt'] = rendered_prompt
+    batch['chosen'] = rendered_chosen
+    batch['rejected'] = rendered_rejected
     batch['chosen_response_only'] = chosen
     batch['rejected_response_only'] = rejected
 
@@ -331,7 +390,8 @@ def get_batch_iterator(names: List[str],
                        transform_config=None,
                        base_data_dir: Optional[str] = None,
                        cache_dir: Optional[str] = None,
-                       reverse_dataset: bool = False) -> Iterator[Dict]:
+                       reverse_dataset: bool = False,
+                       use_chat_template: bool = False) -> Iterator[Dict]:
     """Get an iterator over batches of data. Stops after n_epochs or n_examples, whichever comes first.
 
     Args:
@@ -385,7 +445,7 @@ def get_batch_iterator(names: List[str],
             if done:
                 break
             if sft_mode:
-                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length)
+                batch_element = tokenize_batch_element(prompt, sft_target, sft_target, truncation_mode, tokenizer, max_length, max_prompt_length, use_chat_template=use_chat_template)
                 batch_element = {k: v for k, v in batch_element.items() if 'rejected' not in k}
                 batch.append(batch_element)
                 example_idx += 1
@@ -403,7 +463,7 @@ def get_batch_iterator(names: List[str],
                         break
                     rejected_weight_item = rejected_weight[index] if rejected_weight else None
                     chosen_weight_item = chosen_weight[index] if chosen_weight else None
-                    batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, tokenizer, max_length, max_prompt_length, rejected_weight_item, chosen_weight_item)
+                    batch_element = tokenize_batch_element(prompt, responses[p[0]], responses[p[1]], truncation_mode, tokenizer, max_length, max_prompt_length, rejected_weight_item, chosen_weight_item, use_chat_template=use_chat_template)
                     batch.append(batch_element)
                     example_idx += 1
                     if len(batch) == batch_size:
