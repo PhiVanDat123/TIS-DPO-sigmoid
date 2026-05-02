@@ -83,7 +83,7 @@ trainer: BasicTrainer
 # Can also be MuonWithAuxAdam, MuonWithAuxAdam_sigmoid,
 # SingleDeviceMuonWithAuxAdam, or SingleDeviceMuonWithAuxAdam_sigmoid
 # after installing git+https://github.com/PhiVanDat123/sigmoid_muon.
-optimizer: RMSprop
+optimizer: AdamW
 
 muon:
   # null means reuse the top-level lr value
