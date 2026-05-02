@@ -80,7 +80,22 @@ n_eval_examples: 256
 trainer: BasicTrainer
 
 # The optimizer to use; we use RMSprop because it works about as well as Adam and is more memory-efficient
+# Can also be MuonWithAuxAdam, MuonWithAuxAdam_sigmoid,
+# SingleDeviceMuonWithAuxAdam, or SingleDeviceMuonWithAuxAdam_sigmoid
+# after installing git+https://github.com/PhiVanDat123/sigmoid_muon.
 optimizer: RMSprop
+
+muon:
+  # null means reuse the top-level lr value
+  lr: null
+  aux_adam_lr: null
+  weight_decay: 0
+  aux_adam_weight_decay: 0
+  momentum: 0.95
+  betas:
+  - 0.9
+  - 0.95
+  eps: 1e-8
 
 # number of linear warmup steps for the learning rate
 warmup_steps: 150

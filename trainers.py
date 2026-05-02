@@ -41,6 +41,106 @@ import json
 import functools
 from typing import Optional, Dict, List, Union, Tuple
 
+try:
+    from muon import (
+        MuonWithAuxAdam,
+        MuonWithAuxAdam_sigmoid,
+        SingleDeviceMuonWithAuxAdam,
+        SingleDeviceMuonWithAuxAdam_sigmoid,
+    )
+except ImportError:
+    MuonWithAuxAdam = None
+    MuonWithAuxAdam_sigmoid = None
+    SingleDeviceMuonWithAuxAdam = None
+    SingleDeviceMuonWithAuxAdam_sigmoid = None
+
+MUON_OPTIMIZERS = {
+    'MuonWithAuxAdam': MuonWithAuxAdam,
+    'MuonWithAuxAdam_sigmoid': MuonWithAuxAdam_sigmoid,
+    'SingleDeviceMuonWithAuxAdam': SingleDeviceMuonWithAuxAdam,
+    'SingleDeviceMuonWithAuxAdam_sigmoid': SingleDeviceMuonWithAuxAdam_sigmoid,
+}
+MUON_AUX_ADAM_NAME_HINTS = (
+    'embed',
+    'embedding',
+    'lm_head',
+    'head',
+    'wte',
+    'wpe',
+    'word_embeddings',
+    'position_embeddings',
+    'norm',
+    'ln_',
+    'bias',
+)
+
+
+def _get_config_value(config, key, default=None):
+    value = config.get(key, default) if hasattr(config, 'get') else getattr(config, key, default)
+    return default if value is None else value
+
+
+def _get_optimizer_cls(name: str):
+    if hasattr(torch.optim, name):
+        return getattr(torch.optim, name)
+    if name in MUON_OPTIMIZERS:
+        optimizer_cls = MUON_OPTIMIZERS[name]
+        if optimizer_cls is None:
+            raise ImportError(
+                f'Optimizer {name} requires the muon package. Install it with '
+                '`pip install git+https://github.com/PhiVanDat123/sigmoid_muon`.'
+            )
+        return optimizer_cls
+    available_muon = ', '.join(MUON_OPTIMIZERS.keys())
+    raise ValueError(f'Unknown optimizer {name}. Use a torch.optim optimizer or one of: {available_muon}')
+
+
+def _build_muon_param_groups(model: nn.Module, config: DictConfig):
+    muon_config = config.get('muon', {}) if hasattr(config, 'get') else {}
+    muon_lr = _get_config_value(muon_config, 'lr', config.lr)
+    aux_adam_lr = _get_config_value(muon_config, 'aux_adam_lr', config.lr)
+    muon_weight_decay = _get_config_value(muon_config, 'weight_decay', 0)
+    aux_adam_weight_decay = _get_config_value(muon_config, 'aux_adam_weight_decay', muon_weight_decay)
+    momentum = _get_config_value(muon_config, 'momentum', 0.95)
+    betas = tuple(_get_config_value(muon_config, 'betas', (0.9, 0.95)))
+    eps = _get_config_value(muon_config, 'eps', 1e-8)
+
+    muon_params = []
+    aux_adam_params = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        lowered_name = name.lower()
+        use_aux_adam = parameter.ndim < 2 or any(hint in lowered_name for hint in MUON_AUX_ADAM_NAME_HINTS)
+        if use_aux_adam:
+            aux_adam_params.append(parameter)
+        else:
+            muon_params.append(parameter)
+
+    param_groups = []
+    if muon_params:
+        param_groups.append(dict(
+            params=muon_params,
+            use_muon=True,
+            lr=muon_lr,
+            momentum=momentum,
+            weight_decay=muon_weight_decay,
+        ))
+    if aux_adam_params:
+        param_groups.append(dict(
+            params=aux_adam_params,
+            use_muon=False,
+            lr=aux_adam_lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=aux_adam_weight_decay,
+        ))
+    if not param_groups:
+        raise ValueError('No trainable parameters found for Muon optimizer')
+    rank0_print(f'Muon parameter groups: {len(muon_params)} Muon tensors, {len(aux_adam_params)} AuxAdam tensors')
+    return param_groups
+
+
 def _tdpo_get_batch_logps(logits: torch.FloatTensor, reference_logits: torch.FloatTensor, labels: torch.LongTensor,
                           average_log_prob: bool = False):
     """Compute the kl divergence/log probabilities of the given labels under the given logits.
@@ -562,7 +662,11 @@ class BasicTrainer(object):
         """Begin either SFT or DPO training, with periodic evaluation."""
 
         rank0_print(f'Using {self.config.optimizer} optimizer')
-        self.optimizer = getattr(torch.optim, self.config.optimizer)(self.policy.parameters(), lr=self.config.lr)
+        optimizer_cls = _get_optimizer_cls(self.config.optimizer)
+        if self.config.optimizer in MUON_OPTIMIZERS:
+            self.optimizer = optimizer_cls(_build_muon_param_groups(self.policy, self.config))
+        else:
+            self.optimizer = optimizer_cls(self.policy.parameters(), lr=self.config.lr)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda step: min(1.0, (step + 1) / (self.config.warmup_steps + 1)))
     
         torch.manual_seed(self.seed)
@@ -739,7 +843,7 @@ class FSDPTrainer(BasicTrainer):
             device_id=rank,
             ignored_modules=None,
             limit_all_gathers=False,
-            use_orig_params=False,
+            use_orig_params=config.optimizer in MUON_OPTIMIZERS,
             sync_module_states=False
         )
 

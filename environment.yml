@@ -26,3 +26,4 @@ dependencies:
     - sentencepiece>=0.1.99
     - protobuf>=4.23.3
     - fschat[model_worker,webui]
+    - git+https://github.com/PhiVanDat123/sigmoid_muon
