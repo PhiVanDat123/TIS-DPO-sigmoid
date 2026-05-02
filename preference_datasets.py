@@ -176,7 +176,7 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
             data[prompt]['pairs'].append((n_responses, n_responses + 1))
             data[prompt]['responses'].extend(responses)
             data[prompt]['sft_target'] = chosen
-            
+            '''
             # Process weights
             data[prompt]['rejected_weight'].append(apply_weight_transform(rejected_weight, negate=False))
             if rejected_weight is None:
@@ -185,7 +185,7 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
             data[prompt]['chosen_weight'].append(apply_weight_transform(chosen_weight, negate=True))
             if chosen_weight is None:
                 data[prompt]['chosen_weight'] = None
-                
+             '''   
     return data
 
 
