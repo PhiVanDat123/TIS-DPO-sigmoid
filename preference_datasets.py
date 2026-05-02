@@ -258,18 +258,11 @@ def _tokenize_with_chat_template(prompt: str, response: str, tokenizer) -> Tuple
         add_generation_prompt=False,
     )
 
-    prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
-    response_sequence_tokens = tokenizer(response_text, add_special_tokens=False)
-    prompt_length = len(prompt_tokens['input_ids'])
-
-    if response_sequence_tokens['input_ids'][:prompt_length] != prompt_tokens['input_ids']:
+    if not response_text.startswith(prompt_text):
         raise ValueError('Chat template rendered response is not prefixed by the rendered prompt.')
 
-    response_tokens = {
-        k: v[prompt_length:]
-        for k, v in response_sequence_tokens.items()
-        if k in prompt_tokens
-    }
+    prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
+    response_tokens = tokenizer(response_text[len(prompt_text):], add_special_tokens=False)
     if response_tokens['input_ids'] and response_tokens['input_ids'][-1] == tokenizer.eos_token_id:
         response_tokens['input_ids'] = response_tokens['input_ids'][:-1]
         response_tokens['attention_mask'] = response_tokens['attention_mask'][:-1]
