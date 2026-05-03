@@ -21,13 +21,9 @@ import re
 
 def binary_weight_transform(nums, top_percent=100):
     sorted_nums = sorted(nums, reverse=True)
-    
     threshold_index = int(len(nums) * top_percent / 100)
-    
     num_to_value = {num: 1 if i < threshold_index else 0 for i, num in enumerate(sorted_nums)}
-    
     transformed_list = [num_to_value[num] for num in nums]
-    
     return transformed_list
 
 def threshold_weight_transform(nums, upper_threshold=1, lower_threshold=-1):
@@ -97,7 +93,6 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
        
        Args:
            transform_config: A structured configuration for the weight transformation.
-
     """
     transform_method = transform_config.get('method', 'origin')
     # Get parameters for the specific method
@@ -109,11 +104,9 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
         if weight_values is None:
             return None
             
-        # Apply negation if needed (for chosen weights)
         if negate:
             weight_values = [-x for x in weight_values]
             
-        # Apply the transform method with parameters
         transform_func = weight_transform_methods[transform_method]
         if transform_method == 'binary' and 'top_percent' in transform_params:
             return transform_func(weight_values, top_percent=transform_params['top_percent'])
@@ -144,7 +137,6 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
                 max_scale=transform_params.get('max_scale', 1.3)
             )
         else:
-            # Default case with no special parameters
             return transform_func(weight_values)
 
     file_path = f'{base_data_dir}/{name}/{split}.jsonl'
@@ -158,14 +150,12 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
             chosen = example['chosen']
             rejected = example['rejected']
             
-            # Get weights
             rejected_weight_exists = 'rejected_weight' in example
             chosen_weight_exists = 'chosen_weight' in example
             
             rejected_weight = example.get('rejected_weight', None)
             chosen_weight = example.get('chosen_weight', None)
             
-            # Swap chosen and rejected responses and weights if reverse_dataset is True
             if reverse_dataset:
                 chosen, rejected = rejected, chosen
                 if rejected_weight_exists and chosen_weight_exists:
@@ -186,7 +176,7 @@ def get_dataset(name: str, split: str, silent: bool = False, transform_config=No
             data[prompt]['chosen_weight'].append(apply_weight_transform(chosen_weight, negate=True))
             if chosen_weight is None:
                 data[prompt]['chosen_weight'] = None
-             '''   
+            '''
     return data
 
 
@@ -197,11 +187,10 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
          ints [tokens] or strings [the original texts]) and returns a batch of examples,
          PyTorch tensors padded to the maximum length. Strings are passed through."""
     def collate_fn(batch):
-        # first, pad everything to the same length
         padded_batch = {}
         for k in batch[0].keys():
             if k.endswith('_input_ids') or k.endswith('_attention_mask') or k.endswith('_labels') or k.endswith('_weight'):
-                if 'prompt' in k:  # adapted from https://stackoverflow.com/questions/73256206
+                if 'prompt' in k:
                     to_pad = [torch.LongTensor(ex[k][::-1]) for ex in batch]
                 else:
                     if k.endswith('_weight'):
@@ -210,7 +199,7 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
                         to_pad = [torch.LongTensor(ex[k]) for ex in batch]
                 if k.endswith('_input_ids'):
                     padding_value = tokenizer.pad_token_id
-                elif k.endswith('_labels') :
+                elif k.endswith('_labels'):
                     padding_value = -100
                 elif k.endswith('_attention_mask') or k.endswith('_weight'):
                     padding_value = 0
@@ -218,12 +207,10 @@ def get_collate_fn(tokenizer) -> Callable[[List[Dict]], Dict[str, Union[List, to
                     raise ValueError(f"Unexpected key in batch '{k}'")
 
                 padded_batch[k] = pad_sequence(to_pad, batch_first=True, padding_value=padding_value)
-                if 'prompt' in k:  # for the prompt, flip back so padding is on left side
+                if 'prompt' in k:
                     padded_batch[k] = padded_batch[k].flip(dims=[1])
             else:
                 padded_batch[k] = [ex[k] for ex in batch]
-            
-        # import ipdb; ipdb.set_trace()
 
         return padded_batch
     return collate_fn
@@ -250,8 +237,25 @@ def _prompt_to_chat_messages(prompt: str) -> List[Dict[str, str]]:
 
 
 def _tokenize_with_chat_template(prompt: str, response: str, tokenizer) -> Tuple[Dict, Dict, str, str]:
+    """
+    Tokenize prompt and response using the tokenizer's chat template.
+
+    For Qwen2-style chat templates, the assistant turn ends with <|im_end|>
+    (NOT <|endoftext|>). We do NOT strip or re-add any end token here —
+    the chat template is responsible for all special tokens.
+    The caller (tokenize_batch_element) must NOT append eos_token_id again
+    when use_chat_template=True.
+    """
     messages = _prompt_to_chat_messages(prompt)
-    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    # Render prompt only (with generation prompt so model knows to continue)
+    prompt_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    # Render full conversation including assistant response
     response_text = tokenizer.apply_chat_template(
         messages + [{'role': 'assistant', 'content': response}],
         tokenize=False,
@@ -259,18 +263,34 @@ def _tokenize_with_chat_template(prompt: str, response: str, tokenizer) -> Tuple
     )
 
     if not response_text.startswith(prompt_text):
-        raise ValueError('Chat template rendered response is not prefixed by the rendered prompt.')
+        raise ValueError(
+            'Chat template rendered response is not prefixed by the rendered prompt.\n'
+            f'Prompt text: {prompt_text!r}\n'
+            f'Response text: {response_text!r}'
+        )
 
     prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
+
+    # response_tokens = everything AFTER the prompt prefix
+    # e.g. for Qwen2: "{response}<|im_end|>\n"
+    # We keep <|im_end|> as the end token — do NOT strip it here.
     response_tokens = tokenizer(response_text[len(prompt_text):], add_special_tokens=False)
-    if response_tokens['input_ids'] and response_tokens['input_ids'][-1] == tokenizer.eos_token_id:
-        response_tokens['input_ids'] = response_tokens['input_ids'][:-1]
-        response_tokens['attention_mask'] = response_tokens['attention_mask'][:-1]
 
     return prompt_tokens, response_tokens, prompt_text, response_text
 
 
-def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_mode: str, tokenizer, max_length: int, max_prompt_length: int, rejected_weight=None, chosen_weight=None, use_chat_template: bool = False) -> Dict:
+def tokenize_batch_element(
+    prompt: str,
+    chosen: str,
+    rejected: str,
+    truncation_mode: str,
+    tokenizer,
+    max_length: int,
+    max_prompt_length: int,
+    rejected_weight=None,
+    chosen_weight=None,
+    use_chat_template: bool = False,
+) -> Dict:
     """Tokenize a single batch element.
     
        At this stage, we don't convert to PyTorch tensors yet; we just handle the truncation
@@ -280,6 +300,12 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
        We also create the labels for the chosen/rejected responses, which are of length equal to
          the sum of the length of the prompt and the chosen/rejected response, with -100 for the
          prompt tokens.
+
+       NOTE on end tokens:
+         - use_chat_template=False: we append eos_token_id manually (original behaviour).
+         - use_chat_template=True:  the chat template already appended the correct end token
+           (e.g. <|im_end|> for Qwen2). We do NOT append eos_token_id again to avoid
+           double-ending or appending the wrong token.
     """
     if use_chat_template:
         if not getattr(tokenizer, 'chat_template', None):
@@ -288,7 +314,6 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
         _, rejected_tokens, _, rendered_rejected = _tokenize_with_chat_template(prompt, rejected, tokenizer)
     else:
         chosen_tokens = tokenizer(chosen, add_special_tokens=False)
-        # len(chosen_tokens['input_ids'])  104
         rejected_tokens = tokenizer(rejected, add_special_tokens=False)
         prompt_tokens = tokenizer(prompt, add_special_tokens=False)
         rendered_prompt = prompt
@@ -296,21 +321,23 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
         rendered_rejected = prompt + rejected
 
     if rejected_weight is not None:
-        assert len(rejected_weight) == len(rejected_tokens['input_ids']) 
+        assert len(rejected_weight) == len(rejected_tokens['input_ids'])
     
     if chosen_weight is not None:
         assert len(chosen_weight) == len(chosen_tokens['input_ids'])
     
     if not use_chat_template:
+        # These assertions are only safe when we control tokenization manually
         assert tokenizer.eos_token_id not in prompt_tokens['input_ids'], f"Prompt contains EOS token: {prompt}"
         assert tokenizer.eos_token_id not in chosen_tokens['input_ids'], f"Chosen response contains EOS token: {chosen}"
         assert tokenizer.eos_token_id not in rejected_tokens['input_ids'], f"Rejected response contains EOS token: {rejected}"
 
-    chosen_tokens['input_ids'].append(tokenizer.eos_token_id)
-    chosen_tokens['attention_mask'].append(1)
-
-    rejected_tokens['input_ids'].append(tokenizer.eos_token_id)
-    rejected_tokens['attention_mask'].append(1)
+        # Manually append EOS only when NOT using chat template
+        # (chat template already added the correct end token, e.g. <|im_end|>)
+        chosen_tokens['input_ids'].append(tokenizer.eos_token_id)
+        chosen_tokens['attention_mask'].append(1)
+        rejected_tokens['input_ids'].append(tokenizer.eos_token_id)
+        rejected_tokens['attention_mask'].append(1)
 
     longer_response_length = max(len(chosen_tokens['input_ids']), len(rejected_tokens['input_ids']))
 
@@ -325,7 +352,6 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
 
     # if that's still too long, truncate the response
     if len(prompt_tokens['input_ids']) + longer_response_length > max_length:
-        # print('truncate=====', len(chosen_tokens['input_ids']), len(rejected_tokens['input_ids']))
         chosen_tokens = {k: v[:max_length - max_prompt_length] for k, v in chosen_tokens.items()}
         rejected_tokens = {k: v[:max_length - max_prompt_length] for k, v in rejected_tokens.items()}
 
@@ -340,14 +366,14 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
     batch = {}
 
     if rejected_weight is not None:
-        batch['rejected_weight'] =  [0] * len(prompt_tokens['input_ids']) + rejected_weight[:len(rejected_tokens['input_ids'])-1] + [0]
+        batch['rejected_weight'] = [0] * len(prompt_tokens['input_ids']) + rejected_weight[:len(rejected_tokens['input_ids'])-1] + [0]
     else:
-        batch['rejected_weight'] =  [0] * len(prompt_tokens['input_ids']) + [1]*(len(rejected_tokens['input_ids'])-1) + [0]
+        batch['rejected_weight'] = [0] * len(prompt_tokens['input_ids']) + [1] * (len(rejected_tokens['input_ids'])-1) + [0]
 
     if chosen_weight is not None:
-        batch['chosen_weight'] =  [0] * len(prompt_tokens['input_ids']) + chosen_weight[:len(chosen_tokens['input_ids'])-1] + [0]
+        batch['chosen_weight'] = [0] * len(prompt_tokens['input_ids']) + chosen_weight[:len(chosen_tokens['input_ids'])-1] + [0]
     else:
-        batch['chosen_weight'] =  [0] * len(prompt_tokens['input_ids']) + [1]*(len(chosen_tokens['input_ids'])-1) + [0]
+        batch['chosen_weight'] = [0] * len(prompt_tokens['input_ids']) + [1] * (len(chosen_tokens['input_ids'])-1) + [0]
 
     assert len(batch['chosen_weight']) == len(chosen_sequence_tokens['labels'])
     assert len(batch['rejected_weight']) == len(rejected_sequence_tokens['labels'])
@@ -364,7 +390,6 @@ def tokenize_batch_element(prompt: str, chosen: str, rejected: str, truncation_m
                 continue
             batch[f'{k}_{type_key}'] = tokens
 
-    
     return batch
 
 
@@ -378,7 +403,7 @@ def get_batch_iterator(names: List[str],
                        sft_mode: bool = False,
                        n_epochs: Optional[int] = None,
                        n_examples: Optional[int] = None,
-                       seed:int = 0,
+                       seed: int = 0,
                        silent: bool = False,
                        transform_config=None,
                        base_data_dir: Optional[str] = None,
@@ -395,16 +420,16 @@ def get_batch_iterator(names: List[str],
         shuffle: Whether to shuffle the data after each epoch.
         max_length: Maximum length of the combined prompt + response.
         max_prompt_length: Maximum length of the prompt.
-        sft_mode: Whether to use SFT mode (i.e., return sft_target instead of chosen/rejected). In sft mode, we just return chosen_input_ids, but they contain the sft_target.
+        sft_mode: Whether to use SFT mode (i.e., return sft_target instead of chosen/rejected).
         n_epochs: Number of epochs to run for. This or n_examples must be specified.
         n_examples: Number of examples to run for. This or n_epochs must be specified.
         seed: Random seed.
         silent: Whether to silence the progress bar(s).
-        transform_config: Configuration for weight transformation. Can be a string (method name) or 
-                          a dict with a 'method' field and parameters for that method.
+        transform_config: Configuration for weight transformation.
         base_data_dir: Base directory for the dataset.
         cache_dir: Directory to cache the datasets in.
         reverse_dataset: Whether to reverse the dataset.
+        use_chat_template: Whether to apply the tokenizer's chat template when tokenizing.
     """
     assert n_epochs is not None or n_examples is not None, "Must specify either n_epochs or n_examples"
     if silent:
@@ -448,7 +473,6 @@ def get_batch_iterator(names: List[str],
                         if not silent:
                             print(f'Finished generating {n_examples} examples on {split} split')
                         done = True
-
                     batch = []
             else:
                 for index, p in enumerate(pairs):
