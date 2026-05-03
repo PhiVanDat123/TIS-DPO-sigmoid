@@ -67,9 +67,6 @@ max_length: 512
 # the maximum allowed length for a prompt
 max_prompt_length: 256
 
-# whether DPO should render Human/Assistant examples through tokenizer.apply_chat_template
-use_chat_template: true
-
 # the number of epochs to train for; if null, must specify n_examples
 n_epochs: 1
 
