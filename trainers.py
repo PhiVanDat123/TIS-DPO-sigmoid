@@ -430,10 +430,6 @@ class BasicTrainer(object):
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
-        use_chat_template = bool(config.get('use_chat_template', False)) and config.loss.name == 'dpo'
-        if use_chat_template:
-            rank0_print('Using tokenizer.apply_chat_template for DPO data formatting')
         
         data_iterator_kwargs = dict(
             names=config.datasets,
@@ -445,7 +441,6 @@ class BasicTrainer(object):
             seed=seed, 
             reverse_dataset=config.reverse_dataset, 
             base_data_dir=config.base_data_dir,
-            use_chat_template=use_chat_template,
         )
         
         self.policy = policy
